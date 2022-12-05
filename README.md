@@ -8,8 +8,9 @@ We list the packages in our environment in env.yml file for your reference.
 ## II. Train and test
 ### 1. Fine-tuned models.
 We provide several fine-tuned models for quick usage.
-- Extractive QA: . Download it to `./output/spanqa/`.
-- Generative QA: . Download it to `./output/allenai/`.
+- Models: https://drive.google.com/drive/folders/1ljx4pgpy0ocyHN6pGBjLTuHaG7Dd0RTu?usp=sharing
+- Extractive QA: roberta-large_IO_prefix_transE. Download it to `./output/spanqa/`.
+- Generative QA: will upload later. Download it to `./output/allenai/`.
 
 ### 2. Train from scratch 
 Run `bash ./code/run_span_pred.sh` and `bash ./code/run_ans_generation.sh`.
