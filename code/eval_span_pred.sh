@@ -22,7 +22,7 @@ do
           --task_name  ${task} \
           --file_suffix "_ans_gen.json" \
           --device_num ${device} \
-          --max_seq_length 400 \
+          --max_seq_length 340 \
           --learning_rate ${l} \
           --seed ${seed} \
           --model_dir ${model_dir}

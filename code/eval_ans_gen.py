@@ -28,16 +28,13 @@ from tqdm import tqdm, trange
 import numpy as np
 import torch
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
-from torch.utils.data.distributed import DistributedSampler
-from torch.nn import CrossEntropyLoss
-from transformers import RobertaTokenizer
+from transformers import AutoTokenizer, T5ForConditionalGeneration, BartForConditionalGeneration
+from models import ESTER_Model
 from utils import *
-from models import RobertaSpanPredictor, ESTER_Model
 from optimization import *
 from pathlib import Path
-from collections import Counter
 import re
-import json
+from collections import Counter
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
@@ -63,11 +60,6 @@ def main():
                         type=str,
                         required=True,
                         help="The name of the task to train.")
-    parser.add_argument("--model_dir",
-                        default=None,
-                        type=str,
-                        required=True,
-                        help="The load model directory")
     parser.add_argument("--file_suffix",
                         default=None,
                         type=str,
@@ -80,6 +72,10 @@ def main():
                         help="The maximum total input sequence length after WordPiece tokenization. \n"
                              "Sequences longer than this will be truncated, and sequences shorter \n"
                              "than this will be padded.")
+    parser.add_argument("--model_dir",
+                        type=str,
+                        help="saved model dir",
+                        default="")
     parser.add_argument("--do_lower_case",
                         action='store_true',
                         help="Set this flag if you are using an uncased model.")
@@ -95,6 +91,10 @@ def main():
                         default=5e-5,
                         type=float,
                         help="The initial learning rate for Adam.")
+    parser.add_argument("--num_train_epochs",
+                        default=3.0,
+                        type=float,
+                        help="Total number of training epochs to perform.")
     parser.add_argument("--warmup_proportion",
                         default=0.1,
                         type=float,
@@ -164,17 +164,24 @@ def main():
     logger.info("current task is " + str(task_name))
 
     # construct model
-    if 'roberta' in args.model:
-        if args.model_dir:
-            model_state_dict = torch.load(args.model_dir + "pytorch_model.bin")
-        tokenizer = RobertaTokenizer.from_pretrained(args.model, do_lower_case=args.do_lower_case)
-        model = RobertaSpanPredictor.from_pretrained(args.model, mlp_hid=args.mlp_hid_size)
+    if args.model_dir:
+        logger.info(args.model_dir)
+        model_state_dict = torch.load(args.model_dir + "pytorch_model.bin")
+        tokenizer = AutoTokenizer.from_pretrained(args.model, state_dict=model_state_dict)
+        if 't5' in args.model:
+            model = T5ForConditionalGeneration.from_pretrained(args.model)
+        if 'bart' in args.model:
+            model = BartForConditionalGeneration.from_pretrained(args.model)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.model)
+        model = T5ForConditionalGeneration.from_pretrained(args.model)
 
     if "transE" in args.model_dir:
         model = ESTER_Model(model, args)
     model.load_state_dict(model_state_dict)
 
     model.to(device)
+
     # Prepare optimizer
     param_optimizer = list(model.named_parameters())
     no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
@@ -197,115 +204,131 @@ def main():
     else:
         optimizer = BertAdam(optimizer_grouped_parameters,
                              lr=args.learning_rate,
-                             warmup=args.warmup_proportion)
+                             warmup=args.warmup_proportion,
+                             t_total=1)
+
+    if n_gpu > 1:
+        model = torch.nn.DataParallel(model)
 
     for split in ['dev']:
         eval_data = load_data(args.data_dir, "final_%s" % split, args.file_suffix)
-        eval_features = convert_to_features(eval_data, tokenizer, max_length=args.max_seq_length, evaluation=True, output_dir=args.model_dir)
-
-        eval_inputs = select_field(eval_features, 'inputs')
+        eval_features = convert_to_features(eval_data, tokenizer,
+                                            max_length=args.max_seq_length, evaluation=True, output_dir=args.model_dir, sep_tok=";")
 
         eval_input_ids = torch.tensor(select_field(eval_features, 'input_ids'), dtype=torch.long)
         eval_input_mask = torch.tensor(select_field(eval_features, 'mask_ids'), dtype=torch.long)
-        eval_segment_ids = torch.tensor(select_field(eval_features, 'segment_ids'), dtype=torch.long)
 
-        eval_offsets = select_field(eval_features, 'offsets')
+        eval_type_labels = select_field(eval_features, 'types')
+        eval_types = select_field(eval_features, 'types')
+
+        eval_key_indices = torch.tensor(list(range(len(eval_input_ids))), dtype=torch.long)
+
         eval_labels = select_field(eval_features, 'labels')
+        eval_encoded_outputs = tokenizer(eval_labels, padding=True, truncation=True, return_tensors="pt")
+        eval_output_ids = eval_encoded_outputs['input_ids']
+
         eval_events = select_field(eval_features, 'events')
-        eval_answers = select_field(eval_features, 'answers')
-
-        eval_key_indices = torch.tensor(list(range(len(eval_labels))), dtype=torch.long)
-
-        # flatten question_ids
-        eval_data = TensorDataset(eval_input_ids, eval_input_mask, eval_segment_ids, eval_key_indices)
+        data = TensorDataset(eval_input_ids, eval_input_mask, eval_key_indices, eval_output_ids)
 
         # Run prediction for full data
-        eval_sampler = SequentialSampler(eval_data)
-        eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+        eval_sampler = SequentialSampler(data)
+        eval_dataloader = DataLoader(data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
+        preds, golds, events, perplexity = [], [], [], []
         model.eval()
-        pred_answers = []
+
+        type_indicators = {'Causal': [], 'Indicative Conditional': [], 'Sub-event': [],
+                           'Counterfactual Conditional': [], 'Coreference': []}
+
         for batch in tqdm(eval_dataloader, desc="Evaluating"):
             batch = tuple(t.to(device) for t in batch)
-            input_ids, input_masks, segment_ids, instance_indices = batch
 
-            with torch.no_grad():                
-                eval_logits, _ = model.model(input_ids, attention_mask=input_masks, token_type_ids=segment_ids)
+            input_ids, input_masks, instance_indices, output_ids = batch
 
-                indices = instance_indices.cpu().tolist()
-                offsets = [eval_offsets[i] for i in indices]
+            with torch.no_grad():
+                if "transE" in args.model_dir:
+                    res = model.module.model.generate(input_ids, attention_mask=input_masks, max_length=128)
+                else:
+                    res = model.module.generate(input_ids, attention_mask=input_masks, max_length=128)
+                preds.extend([x.split(";") for x in tokenizer.batch_decode(res, skip_special_tokens=True)])
+                golds.extend([eval_labels[x].split(";") for x in instance_indices.tolist()])
+                events.extend([eval_events[x] for x in instance_indices.tolist()])
 
-                eval_logits = filter_outputs(eval_logits, offsets)
+                for i in instance_indices:
+                    for tk in type_indicators:
+                        if eval_types[i] in tk:
+                            type_indicators[tk].append(1)
+                        else:
+                            type_indicators[tk].append(0)
 
-                preds = unflatten_vector(torch.argmax(eval_logits, dim=-1), offsets)
+        eval_em, eval_f1 = [], []
 
-                batch_tokens = [tokenizer.convert_ids_to_tokens(ids) for ids in input_ids.tolist()]
-                pred_answers.extend(get_answers(preds, offsets, batch_tokens))
-
-        assert len(pred_answers) == len(eval_answers) == len(eval_events)
-        eval_ems, F1, recl, prec, F1_e, r_e, pr_e, F1_a, r_a, pr_a, hit1 = [], [], [], [], [], [], [], [], [], [], []
-        ps, rs, fs = {str(k): [] for k in range(1, 5)}, {str(k): [] for k in range(1, 5)}, {str(k): [] for k in range(1, 5)}
-
-        for i, (pred, gold, event) in enumerate(zip(pred_answers, eval_answers, eval_events)):
-
-            print(pred)
-            print(gold)
-            print(event)
-            print("="*20)
-
+        ems, F1, recl, prec, F1_e, r_e, pr_e, hit1 = [], [], [], [], [], [], [], []
+        for pred, gold, event in zip(preds, golds, events):
+            logger.info(pred)
+            logger.info(gold)
+            logger.info(event)
+            logger.info("="*50)
             em = 1.0 if all([p in gold for p in pred]) and all([g in pred for g in gold]) else 0.0
-            eval_ems.append(em)
+            eval_em.append(em)
 
             # construct unigram counter
-            all_pred_counter = Counter()
-            all_gold_counter = Counter()
+            pred_counter = Counter([x for s in pred for x in re.sub(r'[^\w\s]', '', s).split(' ')])
+            gold_counter = Counter([x for s in gold for x in re.sub(r'[^\w\s]', '', s).split(' ')])
 
-            for n in range(1, 5):
-                pred_counter = get_ngrams(pred, n=n)
-                gold_counter = get_ngrams(gold, n=n)
-                r, p, f = compute_f1(pred_counter, gold_counter)
-                ps[str(n)].append(p)
-                rs[str(n)].append(r)
-                fs[str(n)].append(f)
-                for k, v in pred_counter.items():
-                    all_pred_counter[k] += v
-                for k, v in gold_counter.items():
-                    all_gold_counter[k] += v
-
-            rl, pr, f1 = compute_f1(all_pred_counter, all_gold_counter)
+            rl, pr, f1 = compute_unigram_f1(pred_counter, gold_counter)
             F1.append(f1)
             recl.append(rl)
             prec.append(pr)
-
-            pred_counter = Counter([re.sub(r'[^\w\s]', '', s) for s in pred])
-            gold_counter = Counter([re.sub(r'[^\w\s]', '', s) for s in gold])
-            rl, pr, f1 = compute_f1(pred_counter, gold_counter)
-            F1_a.append(f1)
-            r_a.append(rl)
-            pr_a.append(pr)
 
             rl, pr, f1 = compute_event_f1(pred, event)
             F1_e.append(f1)
             r_e.append(rl)
             pr_e.append(pr)
 
-            if pred:
-                hit1.append(compute_hit1(pred[0], event))
+            if f1 == 1.0:
+                ems.append(1.0)
             else:
-                hit1.append(0.0)
+                ems.append(0.0)
 
-        logger.info("EM is %.4f" % np.mean(eval_ems))
+            hit1.append(compute_hit1(pred[0], event))
+
+        logger.info("Answer EM is %.4f" % np.mean(eval_em))
+        logger.info("Event EM is %.4f" % np.mean(ems))
         logger.info("Event HIT@1 is %.4f" % np.mean(hit1))
-        logger.info("Overall Token Recall, Precision, F1 are %.4f, %.4f, %.4f" %
+        logger.info("Token Recall, Precision, F1 are %.4f, %.4f, %.4f" %
                     (np.mean(recl), np.mean(prec), np.mean(F1)))
-        logger.info("Answer Recall, Precision, F1 are %.4f, %.4f, %.4f" %
-                    (np.mean(r_a), np.mean(pr_a), np.mean(F1_a)))
         logger.info("Event Recall, Precision, F1 are %.4f, %.4f, %.4f" %
                     (np.mean(r_e), np.mean(pr_e), np.mean(F1_e)))
 
-        for n in range(1, 5):
-            logger.info("%s-gram Recall, Precision, F1 are %.4f, %.4f, %.4f" %
-                        (n, np.mean(rs[str(n)]), np.mean(ps[str(n)]), np.mean(fs[str(n)])))
+        logger.info("=" * 50)
+        for key, idx in type_indicators.items():
+            print("Eval %s questions" % key)
+            assert len(idx) == len(golds)
+            logger.info("Total %s questions (%.1f)" % (sum(idx), 100 * sum(idx) / len(golds)))
+
+            ans_ems = [v for k, v in zip(idx, eval_em) if k == 1]
+            temp_ems = [v for k, v in zip(idx, ems) if k == 1]
+
+            temp_r = [v for k, v in zip(idx, recl) if k == 1]
+            temp_pr = [v for k, v in zip(idx, prec) if k == 1]
+            temp_f1s = [v for k, v in zip(idx, F1) if k == 1]
+
+            temp_r_e = [v for k, v in zip(idx, r_e) if k == 1]
+            temp_pr_e = [v for k, v in zip(idx, pr_e) if k == 1]
+            temp_f1_e = [v for k, v in zip(idx, F1_e) if k == 1]
+
+            temp_hit1 = [v for k, v in zip(idx, hit1) if k == 1]
+
+            logger.info("Total %s QAs" % len(temp_ems))
+            logger.info("Answer EM is %.4f" % np.mean(ans_ems))
+            logger.info("Event EM is %.4f" % np.mean(temp_ems))
+            logger.info("Event HIT@1 is %.4f" % np.mean(temp_hit1))
+            logger.info("Token Recall, Precision, F1 are %.4f, %.4f, %.4f" %
+                  (np.mean(temp_r), np.mean(temp_pr), np.mean(temp_f1s)))
+            logger.info("Event Recall, Precision, F1 are %.4f, %.4f, %.4f" %
+                  (np.mean(temp_r_e), np.mean(temp_pr_e), np.mean(temp_f1_e)))
+            logger.info("=" * 20)
 
 if __name__ == "__main__":
     main()
