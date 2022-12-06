@@ -13,7 +13,7 @@ We provide several fine-tuned models for quick usage.
 - Generative QA: will be uploaded later. Download it to `./output/allenai/`.
 
 ### 2. Train from scratch 
-`export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python`
+Run `export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python`.  
 Run `bash ./code/run_span_pred.sh` and `bash ./code/run_ans_generation.sh`.
 
 ### 3. Test on dev set
