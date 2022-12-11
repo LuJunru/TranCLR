@@ -10,7 +10,7 @@ We list the packages in our environment in env.yml file for your reference.
 We provide several fine-tuned models for quick usage.
 - Models: https://drive.google.com/drive/folders/1ljx4pgpy0ocyHN6pGBjLTuHaG7Dd0RTu?usp=sharing
 - Extractive QA: roberta-large_IO_prefix_transE. Download it to `./output/spanqa/`.
-- Generative QA: will be uploaded later. Download it to `./output/allenai/`.
+- Generative QA: unifiedqa-t5-large_prefix_transE. Download it to `./output/allenai/`.
 
 ### 2. Train from scratch 
 Run `export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python`.  
