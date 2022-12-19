@@ -385,17 +385,18 @@ def convert_to_features(data, tokenizer, max_length=300, evaluation=False, outpu
             # offsets[0] - offsets[-1]: paragraph part
             q_p = tokenizer.decode(tokenized_ids[:offsets[-1]])
             outputs_ = tokenizerfast.encode_plus(q_p, add_special_tokens=False, return_offsets_mapping=True)
+            moving = 1 if "prefix" in output_dir else 0
             for loc_i, loc in enumerate(outputs_['offset_mapping']):
                 q_p_t = q_p[loc[0]:loc[1]].strip()
                 a_q_p_t = wnl.lemmatize(q_p_t, get_wordnet_pos(q_p_t)).strip()
                 if (q_p_t in question_event) or (a_q_p_t in question_event):
-                    event_ids.append(loc_i + 1)
+                    event_ids.append(loc_i + moving)
                     clr_ids.append(2)
                 elif (q_p_t in answer_events) or (a_q_p_t in answer_events):
-                    event_ids.append(loc_i + 1)
+                    event_ids.append(loc_i + moving)
                     clr_ids.append(1)
                 elif (q_p_t in all_events) or (q_p_t in all_events):
-                    event_ids.append(loc_i + 1)
+                    event_ids.append(loc_i + moving)
                     clr_ids.append(0)
             m_e = max(m_e, len(event_ids))
             if sum(clr_ids) < 2:
