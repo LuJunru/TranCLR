@@ -296,7 +296,10 @@ def convert_to_features(data, tokenizer, max_length=300, evaluation=False, outpu
         else:
             q_start = 1  # cls
             question = tokenizer.tokenize(v['question'].lower())
-            q_end = len(question) + 1  # cls
+            if sep_tok is None:
+                q_end = len(question) + 1  # cls
+            else:
+                q_end = len(question)
         
         context = tokenizer.tokenize(v['context'].lower())
         answers = [ans.lower() for ans in v['answer_texts']]
