@@ -334,7 +334,7 @@ def main():
                     for batch_id in range(input_ids.size(0)):
                         batch_event_ids = event_ids[batch_id]  # (36)
                         batch_clr_ids = clr_ids[batch_id]  # (36)
-                        valid_batch_clr_len = len([ccc for ccc in batch_clr_ids if ccc + 1 < final_hidden_state.size(1)])
+                        valid_batch_clr_len = len([ccc for ccc in batch_event_ids if ccc + 1 < final_hidden_state.size(1)])
                         batch_event_clr_loss = []
                         """
                         batch_clr_ids: 1, 0, 0, 1, 2, 0, 0
