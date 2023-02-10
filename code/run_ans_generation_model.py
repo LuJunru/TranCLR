@@ -371,7 +371,7 @@ def main():
 
                                         batch_event_clr_loss.append(cur_clr_loss)
                         if len(batch_event_clr_loss) > 0:
-                            event_clr_loss.append(sum(batch_event_clr_loss) / len(batch_event_clr_loss))
+                            event_clr_loss += batch_event_clr_loss
                     if len(event_clr_loss) > 0:
                         event_clr_loss = sum(event_clr_loss) / len(event_clr_loss)
                     else:
